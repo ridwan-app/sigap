@@ -1,0 +1,6 @@
+{
+  "name": "SIGAP - Sistem Gembok Asesmen & Pembelajaran",
+  "description": "SIGAP (Sistem Gembok Asesmen & Pembelajaran) - Aplikasi portal materi dan asesmen pembelajaran Kurikulum Merdeka terintegrasi Google Form dengan mode kiosk kunci layar penuh.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
