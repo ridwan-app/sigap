@@ -5,13 +5,16 @@ import {
   User, 
   KeyRound,
   RotateCcw,
-  FileText,
   BookMarked,
-  XCircle
+  XCircle,
+  ShieldAlert,
+  ShieldCheck,
+  AlertTriangle
 } from 'lucide-react';
 import { Exam, StudentSession } from '../types';
 import { normalizeGoogleFormUrl, getStoredTeachers } from '../utils/storage';
 import { requestScreenWakeLock, releaseScreenWakeLock } from '../utils/wakeLock';
+import { sendLockSignalToNative, isRunningInNativeExambro, playViolationAlarm } from '../utils/kioskBridge';
 import { UniversalDocumentViewer } from './UniversalDocumentViewer';
 
 interface LockedExamRoomProps {
@@ -25,10 +28,17 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const isMaterial = exam.examType === 'material_document';
 
-  // Dialog Konfirmasi Keluar (Khusus Pengawas)
+  // Dialog Konfirmasi Keluar Normal (Khusus Pengawas)
   const [isExitModalOpen, setIsExitModalOpen] = useState<boolean>(false);
   const [exitPinInput, setExitPinInput] = useState<string>('');
   const [exitPinError, setExitPinError] = useState<string>('');
+
+  // Status Pelanggaran / Anti-Curang (Khusus Asesmen)
+  const [violationCount, setViolationCount] = useState<number>(0);
+  const [isViolationModalOpen, setIsViolationModalOpen] = useState<boolean>(false);
+  const [violationPinInput, setViolationPinInput] = useState<string>('');
+  const [violationPinError, setViolationPinError] = useState<string>('');
+  const isNativeApp = isRunningInNativeExambro();
 
   // Countdown Sisa Waktu Ujian
   const initialDurationSeconds = exam.durationMinutes * 60;
@@ -54,12 +64,18 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
     }
   }, []);
 
+  // Inisialisasi Penguncian & Sensor Anti-Curang
   useEffect(() => {
     ensureFullscreen();
     requestScreenWakeLock();
 
+    // Jika ini adalah Asesmen (bukan sekadar baca materi), kirim sinyal kunci ke APK
+    if (!isMaterial) {
+      sendLockSignalToNative(true);
+    }
+
+    // Blokir kombinasi tombol inspect / devtools / shortcuts
     const handlePreventNavKeys = (e: KeyboardEvent) => {
-      // Blokir F12, F11, Ctrl+U, Ctrl+C, Ctrl+V, Escape
       if (
         e.key === 'F12' ||
         e.key === 'F11' ||
@@ -77,15 +93,40 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
       return false;
     };
 
+    // Deteksi jika siswa meninggalkan layar / membuka aplikasi lain / tekan Home
+    const handleVisibilityChange = () => {
+      if (document.hidden && !isMaterial) {
+        setViolationCount(prev => {
+          const next = prev + 1;
+          return next;
+        });
+        setIsViolationModalOpen(true);
+        playViolationAlarm();
+      }
+    };
+
+    // Cegah tombol back browser / HP
+    const handlePopState = (e: PopStateEvent) => {
+      e.preventDefault();
+      window.history.pushState(null, '', window.location.href);
+      ensureFullscreen();
+    };
+    window.history.pushState(null, '', window.location.href);
+    window.addEventListener('popstate', handlePopState);
+
     document.addEventListener('keydown', handlePreventNavKeys, true);
     document.addEventListener('contextmenu', handleContextMenu);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       releaseScreenWakeLock();
+      sendLockSignalToNative(false);
+      window.removeEventListener('popstate', handlePopState);
       document.removeEventListener('keydown', handlePreventNavKeys, true);
       document.removeEventListener('contextmenu', handleContextMenu);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [ensureFullscreen]);
+  }, [ensureFullscreen, isMaterial]);
 
   // Timer Countdown
   useEffect(() => {
@@ -108,7 +149,7 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
     }
   };
 
-  // Konfirmasi Keluar Ujian oleh Pengawas
+  // Konfirmasi Keluar Ujian Normal oleh Pengawas
   const handleTeacherExitConfirm = (e: FormEvent) => {
     e.preventDefault();
     setExitPinError('');
@@ -122,12 +163,36 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
       isTeacherPinValid
     ) {
       releaseScreenWakeLock();
+      sendLockSignalToNative(false);
       if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
       }
       onFinishExam();
     } else {
       setExitPinError('PIN Pengawas salah!');
+    }
+  };
+
+  // Buka Kunci Layar Pelanggaran oleh Pengawas
+  const handleUnlockViolation = (e: FormEvent) => {
+    e.preventDefault();
+    setViolationPinError('');
+
+    const trimmedInput = violationPinInput.trim();
+    const teachers = getStoredTeachers();
+    const isTeacherPinValid = teachers.some(t => t.pin === trimmedInput);
+
+    if (
+      trimmedInput === exam.supervisorPin.trim() ||
+      isTeacherPinValid
+    ) {
+      setIsViolationModalOpen(false);
+      setViolationPinInput('');
+      setViolationPinError('');
+      ensureFullscreen();
+      sendLockSignalToNative(true);
+    } else {
+      setViolationPinError('PIN Pengawas tidak valid!');
     }
   };
 
@@ -151,10 +216,17 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
             <span className="truncate">{exam.subject}</span>
           </div>
           <span className="text-white/40 hidden sm:inline">&bull;</span>
-          <div className="hidden sm:flex items-center gap-1 text-[11px] font-semibold text-emerald-100">
+          <div className="hidden sm:flex items-center gap-1 text-[11px] font-semibold text-emerald-100 truncate">
             <User className="w-3 h-3 text-emerald-200" />
-            <span>{session.studentName}</span>
+            <span className="truncate">{session.studentName}</span>
           </div>
+
+          {!isMaterial && (
+            <div className="hidden md:flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-black/20 text-emerald-200">
+              <ShieldCheck className="w-3 h-3 text-emerald-300" />
+              <span>{isNativeApp ? 'EXAMBRO AKTIF' : 'KIOSK AKTIF'}</span>
+            </div>
+          )}
         </div>
 
         {/* Kanan: Muat Ulang, Timer (jika asesmen), dan Tombol Selesai */}
@@ -183,6 +255,7 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
             <button
               onClick={() => {
                 releaseScreenWakeLock();
+                sendLockSignalToNative(false);
                 if (document.fullscreenElement) {
                   document.exitFullscreen().catch(() => {});
                 }
@@ -237,7 +310,7 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
             src={cleanGoogleFormUrl}
             title="Formulir Asesmen"
             className="w-full h-full border-0"
-            allow="fullscreen"
+            allow="fullscreen; camera; microphone"
             referrerPolicy="no-referrer"
           />
         ) : (
@@ -248,7 +321,63 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
       </main>
 
       {/* ============================================================ */}
-      {/* DIALOG KELUAR / BUKA KUNCI PENGAWAS */}
+      {/* DIALOG DARURAT PELANGGARAN KELUAR LAYAR (ANTI-CHEAT LOCKDOWN) */}
+      {/* ============================================================ */}
+      {isViolationModalOpen && !isMaterial && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-[#1c1f26] rounded-3xl max-w-sm w-full p-6 shadow-2xl border-2 border-rose-500/50 space-y-4 text-center">
+            <div className="w-14 h-14 bg-rose-500/10 border border-rose-500/30 rounded-2xl flex items-center justify-center mx-auto text-rose-500 animate-pulse">
+              <ShieldAlert className="w-8 h-8" />
+            </div>
+
+            <div className="space-y-1">
+              <h3 className="font-black text-white text-base tracking-wider uppercase">
+                Layar Ujian Terkunci!
+              </h3>
+              <p className="text-xs text-rose-300/90 font-medium">
+                Terdeteksi meninggalkan aplikasi / membuka menu lain.
+              </p>
+            </div>
+
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-bold">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Pelanggaran Ke-{violationCount}</span>
+            </div>
+
+            <div className="bg-[#13161c] p-3.5 rounded-2xl border border-white/5 text-left space-y-2">
+              <p className="text-[11px] text-slate-300 text-center">
+                Panggil <strong className="text-emerald-400">Guru / Pengawas</strong> untuk membuka kunci dengan PIN Pengawas:
+              </p>
+
+              <form onSubmit={handleUnlockViolation} className="space-y-2.5">
+                <input
+                  type="password"
+                  required
+                  value={violationPinInput}
+                  onChange={e => setViolationPinInput(e.target.value)}
+                  placeholder="PIN Pengawas..."
+                  className="w-full px-3.5 py-2.5 bg-[#1e232d] border border-rose-500/40 focus:border-rose-400 rounded-xl text-center text-xs font-mono font-bold text-white tracking-widest outline-hidden"
+                  autoFocus
+                />
+
+                {violationPinError && (
+                  <p className="text-[11px] text-rose-400 font-semibold text-center">{violationPinError}</p>
+                )}
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 active:scale-95 text-white font-bold rounded-xl text-xs shadow-lg shadow-rose-600/30 transition-all"
+                >
+                  Buka Kunci Layar
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* DIALOG KELUAR NORMAL / BUKA KUNCI PENGAWAS */}
       {/* ============================================================ */}
       {isExitModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-2xs">
@@ -305,3 +434,4 @@ export function LockedExamRoom({ exam, session, onFinishExam }: LockedExamRoomPr
     </div>
   );
 }
+
