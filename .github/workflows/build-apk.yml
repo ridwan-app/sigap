@@ -20,23 +20,17 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.5'
-
-      - name: Accept Android Licenses
-        run: |
-          yes | sdkmanager --licenses || true
 
       - name: Build APK with Gradle
         run: |
           cd android
           chmod +x gradlew || true
           gradle assembleDebug --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/SIGAP-Exambro-v1.0.apk || true
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
